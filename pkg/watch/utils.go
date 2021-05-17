@@ -8,16 +8,29 @@ import (
 	"github.com/athiban2001/go-mon/pkg/tree"
 )
 
-func ArrayDifference(root *tree.Node, infos []fs.FileInfo) []*tree.Node {
+func insertChildrenInOrder(oldChildren []*tree.Node, addition []*tree.Node) []*tree.Node {
+	for k := range addition {
+		i := sort.Search(len(oldChildren), func(i int) bool {
+			return oldChildren[i].Name > addition[k].Name
+		})
+		oldChildren = append(oldChildren, &tree.Node{})
+		copy(oldChildren[i+1:], oldChildren[i:])
+		oldChildren[i] = addition[k]
+	}
+
+	return oldChildren
+}
+
+func AddChildren(root *tree.Node, infos []fs.FileInfo) ([]*tree.Node, []*tree.Node) {
 	infosLen := len(infos)
 	childrenLen := len(root.Children)
-	difference := make([]*tree.Node, 0)
-
+	newChildren := make([]*tree.Node, 0)
 	i, j := 0, 0
+
 	for i < infosLen && j < childrenLen {
 		absFileName := filepath.Join(root.Name, infos[i].Name())
 		if absFileName < root.Children[j].Name {
-			difference = append(difference, tree.NewNode(absFileName, infos[i].ModTime(), infos[i].IsDir()))
+			newChildren = append(newChildren, tree.NewNode(absFileName, infos[i].ModTime(), infos[i].IsDir()))
 			i++
 		} else if absFileName > root.Children[j].Name {
 			j++
@@ -28,30 +41,34 @@ func ArrayDifference(root *tree.Node, infos []fs.FileInfo) []*tree.Node {
 	}
 
 	k := i
-	appendArray := make([]*tree.Node, 0)
+	nodesFromInfo := make([]*tree.Node, 0)
 	for k < infosLen {
-		appendArray = append(appendArray, tree.NewNode(filepath.Join(root.Name, infos[k].Name()), infos[k].ModTime(), infos[k].IsDir()))
+		nodesFromInfo = append(nodesFromInfo, tree.NewNode(filepath.Join(root.Name, infos[k].Name()), infos[k].ModTime(), infos[k].IsDir()))
 		k++
 	}
 
 	if i < infosLen {
-		finalLength := infosLen - i + len(difference)
-		if finalLength > cap(difference) {
+		finalLength := infosLen - i + len(newChildren)
+		if finalLength > cap(newChildren) {
 			newDifference := make([]*tree.Node, finalLength)
-			copy(newDifference, difference)
-			copy(newDifference[len(difference):], appendArray)
-			difference = newDifference
+			copy(newDifference, newChildren)
+			copy(newDifference[len(newChildren):], nodesFromInfo)
+			newChildren = newDifference
 		} else {
-			differenceLen := len(difference)
-			difference = difference[:finalLength]
-			copy(difference[differenceLen:], appendArray)
+			differenceLen := len(newChildren)
+			newChildren = newChildren[:finalLength]
+			copy(newChildren[differenceLen:], nodesFromInfo)
 		}
 	}
 
-	return difference
+	if len(newChildren) != 0 {
+		return insertChildrenInOrder(root.Children, newChildren), newChildren
+	}
+
+	return root.Children, newChildren
 }
 
-func GetRemainingChildren(root *tree.Node, infos []fs.FileInfo) []*tree.Node {
+func RemoveChildren(root *tree.Node, infos []fs.FileInfo) []*tree.Node {
 	children := root.Children
 	remainingChildren := make([]*tree.Node, 0)
 	i, j := 0, 0
@@ -71,17 +88,4 @@ func GetRemainingChildren(root *tree.Node, infos []fs.FileInfo) []*tree.Node {
 	}
 
 	return remainingChildren
-}
-
-func InsertChildren(oldChildren []*tree.Node, addition []*tree.Node) []*tree.Node {
-	for k := range addition {
-		i := sort.Search(len(oldChildren), func(i int) bool {
-			return oldChildren[i].Name > addition[k].Name
-		})
-		oldChildren = append(oldChildren, &tree.Node{})
-		copy(oldChildren[i+1:], oldChildren[i:])
-		oldChildren[i] = addition[0]
-	}
-
-	return oldChildren
 }

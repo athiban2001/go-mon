@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/athiban2001/go-mon/pkg/watch"
 	"github.com/fatih/color"
@@ -27,10 +30,23 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error : %v\n", err)
 	}
 
-	events, errors, err := watch.Start(rootPath, *ignoreDotFiles)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	events, errors, err := watch.Start(ctx, rootPath, *ignoreDotFiles)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error : %v\n", err)
 	}
+
+	go func() {
+		command := ""
+		fmt.Scanln(&command)
+		if command == "rs" {
+			cancel()
+		}
+	}()
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
 	for {
 		select {
@@ -38,6 +54,11 @@ func main() {
 			fmt.Println(data)
 		case err := <-errors:
 			fmt.Fprintf(os.Stderr, "Error : %v\n", err)
+		case <-ctx.Done():
+			return
+		case <-c:
+			cancel()
+			return
 		}
 	}
 }

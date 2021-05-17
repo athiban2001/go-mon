@@ -1,10 +1,11 @@
 package watch
 
 import (
-	"errors"
+	"context"
+	"fmt"
+	"io/fs"
 	"io/ioutil"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -12,110 +13,133 @@ import (
 )
 
 // Start : Initialize the watching event
-func Start(foldername string, ignoreDotFiles bool) (chan string, chan error, error) {
+func Start(ctx context.Context, foldername string, ignoreDotFiles bool) (chan string, chan error, error) {
 	stat, err := os.Stat(foldername)
 	if os.IsNotExist(err) {
 		return nil, nil, err
 	}
+	if err != nil {
+		return nil, nil, err
+	}
 	if !stat.IsDir() {
-		return nil, nil, errors.New("not a directory")
+		return nil, nil, fmt.Errorf("not a directory")
 	}
 
 	events := make(chan string)
 	errors := make(chan error)
+	wg := &sync.WaitGroup{}
 
 	root, err := tree.Build(foldername, ignoreDotFiles)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	wg := &sync.WaitGroup{}
-	watchTree(wg, root, ignoreDotFiles, events, errors)
+	watchTree(ctx, wg, root, ignoreDotFiles, events, errors)
 
 	return events, errors, nil
 }
 
-func watchTree(wg *sync.WaitGroup, root *tree.Node, ignoreDotFiles bool, events chan<- string, errors chan<- error) {
+func watchTree(ctx context.Context, wg *sync.WaitGroup, root *tree.Node, ignoreDotFiles bool, events chan<- string, errors chan<- error) {
 	wg.Add(1)
-
-	if !root.IsDir {
-		go watchFile(root, events, errors)
-		return
-	}
-	go watchDir(wg, root, ignoreDotFiles, events, errors)
+	defer wg.Done()
 
 	for _, val := range root.Children {
-		watchTree(wg, val, ignoreDotFiles, events, errors)
+		watchTree(ctx, wg, val, ignoreDotFiles, events, errors)
 	}
 
-	wg.Done()
+	if root.IsDir {
+		go watchDir(ctx, wg, root, ignoreDotFiles, events, errors)
+		return
+	}
+	go watchFile(ctx, root, events, errors)
 }
 
-func watchDir(wg *sync.WaitGroup, root *tree.Node, ignoreDotFiles bool, events chan<- string, errors chan<- error) {
+func watchDir(ctx context.Context, wg *sync.WaitGroup, root *tree.Node, ignoreDotFiles bool, events chan<- string, errors chan<- error) {
 	wg.Wait()
+	fmt.Println("HERE")
+
+	var newlyAddedChildren []*tree.Node
+	var stat fs.FileInfo
+	var infos []fs.FileInfo
+	var err error
+	var modTime time.Time
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
-		stat, err := os.Stat(root.Name)
-		if os.IsNotExist(err) {
-			events <- root.Name + " DELETED"
-			return
-		}
-		if err != nil {
-			errors <- err
-			return
-		}
-		if root.ModTime != stat.ModTime() {
-			infos, err := ioutil.ReadDir(root.Name)
+		select {
+		case <-ticker.C:
+			stat, err = os.Stat(root.Name)
+			if os.IsNotExist(err) {
+				events <- root.Name + " DELETED"
+				return
+			}
 			if err != nil {
 				errors <- err
 				return
 			}
-
-			for k, val := range infos {
-				if strings.Index(val.Name(), ".") == 0 {
-					infos = append(infos[:k], infos[k+1:]...)
+			modTime = stat.ModTime()
+			if root.ModTime != modTime {
+				infos, err = ioutil.ReadDir(root.Name)
+				if err != nil {
+					errors <- err
+					return
 				}
-			}
 
-			if len(infos) > len(root.Children) {
-				newlyAddedFiles := ArrayDifference(root, infos)
-				if len(newlyAddedFiles) != 0 {
-					root.Children = InsertChildren(root.Children, newlyAddedFiles)
+				for k, val := range infos {
+					if ignoreDotFiles && val.Name()[0] == '.' {
+						infos = append(infos[:k], infos[k+1:]...)
+					}
+				}
 
-					for _, val := range newlyAddedFiles {
+				if len(infos) > len(root.Children) {
+					root.Children, newlyAddedChildren = AddChildren(root, infos)
+					for _, val := range newlyAddedChildren {
 						if val.IsDir {
-							go watchDir(wg, val, ignoreDotFiles, events, errors)
+							go watchDir(ctx, wg, val, ignoreDotFiles, events, errors)
 						} else {
-							go watchFile(val, events, errors)
+							go watchFile(ctx, val, events, errors)
 						}
 						events <- val.Name + " INSERTED"
 					}
+				} else if len(infos) < len(root.Children) {
+					root.Children = RemoveChildren(root, infos)
 				}
-			} else if len(infos) < len(root.Children) {
-				root.Children = GetRemainingChildren(root, infos)
 			}
+		case <-ctx.Done():
+			return
 		}
-
-		time.Sleep(500 * time.Millisecond)
 	}
 }
 
-// watchFile : Watches for the file changes
-func watchFile(root *tree.Node, events chan<- string, errors chan<- error) {
-	for {
-		stat, err := os.Stat(root.Name)
-		if os.IsNotExist(err) {
-			events <- root.Name + " DELETED"
-			return
-		}
-		if err != nil {
-			errors <- err
-			return
-		}
-		if stat.ModTime() != root.ModTime {
-			root.ModTime = stat.ModTime()
-			events <- root.Name + " MODIFIED"
-		}
+func watchFile(ctx context.Context, root *tree.Node, events chan<- string, errors chan<- error) {
+	var stat fs.FileInfo
+	var err error
+	var modTime time.Time
 
-		time.Sleep(500 * time.Millisecond)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			stat, err = os.Stat(root.Name)
+			if os.IsNotExist(err) {
+				events <- root.Name + " DELETED"
+				return
+			}
+			if err != nil {
+				errors <- err
+				return
+			}
+			modTime = stat.ModTime()
+			if modTime != root.ModTime {
+				root.ModTime = modTime
+				events <- root.Name + " MODIFIED"
+			}
+		case <-ctx.Done():
+			return
+		}
 	}
 }

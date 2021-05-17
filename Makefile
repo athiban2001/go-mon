@@ -1,2 +1,2 @@
 run:
-	go run -race cmd/*.go $(argument)
+	go run -race main.go $(argument)
