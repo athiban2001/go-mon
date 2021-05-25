@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/athiban2001/go-mon/pkg/watch"
@@ -14,51 +17,90 @@ import (
 )
 
 func main() {
-	foldername := flag.String("foldername", ".", "Folder to watch changes for")
-	ignoreDotFiles := flag.Bool("ignoredot", true, "Ignore files and folders that starts with .")
+	foldername := flag.String("f", ".", "Folder to watch changes for")
+	ignoreDotFiles := flag.Bool("i", true, "Ignore files and folders that starts with .")
+	extensions := flag.String("e", ".go", "Extensions to watch out for comma-separated eg: .go,.html")
+	command := flag.String("c", "make run", "Command to re-run the system")
 	flag.Parse()
 
-	color.Yellow("[go-mon] version 1.0")
-	color.Yellow("[go-mon] to restart at any time, press `rs`")
-	color.Yellow("[go-mon] watching path: `%s`", *foldername)
-	if *ignoreDotFiles {
-		color.Yellow("[go-mon] ignoring .* files")
-	}
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
 	rootPath, err := filepath.Abs(*foldername)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error : %v\n", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	color.Yellow("[go-mon] version 1.0")
+	color.Yellow("[go-mon] to restart at any time, press `rs`")
+	color.Yellow("[go-mon] watching path: `%s`", rootPath)
+	if *ignoreDotFiles {
+		color.Yellow("[go-mon] ignoring .* files")
+	}
+	color.Yellow("[go-mon] watching extensions : `%s`", *extensions)
 
-	events, errors, err := watch.Start(ctx, rootPath, *ignoreDotFiles)
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+	events, errors, err := watch.Start(watchCtx, rootPath, *ignoreDotFiles, *extensions)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error : %v\n", err)
 	}
 
+	execCtx, execCancel := context.WithCancel(context.Background())
+	triggerC := make(chan string)
+
+	go execute(execCtx, rootPath, *command, triggerC)
+	triggerC <- "INIT"
+
 	go func() {
 		command := ""
-		fmt.Scanln(&command)
-		if command == "rs" {
-			cancel()
+		for {
+			fmt.Scanln(&command)
+			if command == "rs" {
+				triggerC <- "RESTART"
+			}
 		}
 	}()
-
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
 	for {
 		select {
 		case data := <-events:
-			fmt.Println(data)
+			triggerC <- data
 		case err := <-errors:
 			fmt.Fprintf(os.Stderr, "Error : %v\n", err)
-		case <-ctx.Done():
+		case <-watchCtx.Done():
 			return
 		case <-c:
-			cancel()
+			watchCancel()
+			execCancel()
 			return
+		}
+	}
+}
+
+func execute(ctx context.Context, folderpath string, command string, triggerC <-chan string) {
+	commandList := strings.Split(command, " ")
+	executable := commandList[0]
+	args := commandList[1:]
+	errOut := &bytes.Buffer{}
+
+	for val := range triggerC {
+		errOut.Reset()
+		if val == "INIT" {
+			color.Green("[go-mon] starting `%s`", command)
+		} else {
+			color.Green("[go-mon] restarting `%s`", command)
+		}
+		cmd := exec.CommandContext(ctx, executable, args...)
+		cmd.Dir = folderpath
+		cmd.Env = os.Environ()
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = errOut
+		if err := cmd.Run(); err != nil {
+			if strings.Contains(errOut.String(), "no such file or directory") {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "%s", errOut)
 		}
 	}
 }
