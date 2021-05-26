@@ -78,19 +78,23 @@ func main() {
 }
 
 func execute(ctx context.Context, folderpath string, command string, triggerC <-chan string) {
+	var cmd *exec.Cmd
 	commandList := strings.Split(command, " ")
 	executable := commandList[0]
 	args := commandList[1:]
 	errOut := &bytes.Buffer{}
 
 	for val := range triggerC {
+		if cmd != nil {
+			cmd.Process.Kill()
+		}
 		errOut.Reset()
 		if val == "INIT" {
 			color.Green("[go-mon] starting `%s`", command)
 		} else {
 			color.Green("[go-mon] restarting `%s`", command)
 		}
-		cmd := exec.CommandContext(ctx, executable, args...)
+		cmd = exec.CommandContext(ctx, executable, args...)
 		cmd.Dir = folderpath
 		cmd.Env = os.Environ()
 		cmd.Stdin = os.Stdin
